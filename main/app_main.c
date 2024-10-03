@@ -1,6 +1,4 @@
-
-
-/* MQTT (over TCP) and Button Example */
+/* MQTT (over TCP) and LED Control via MQTT Example */
 
 #include <stdio.h>
 #include <stdint.h>
@@ -27,16 +25,12 @@
 #include "driver/gpio.h"  // For GPIO control
 
 // Define constants
-#define BUTTON_GPIO 23
+#define LED_GPIO 2
 #define ESP_INTR_FLAG_DEFAULT 0  // Manually define ESP_INTR_FLAG_DEFAULT
 
-static const char *TAG = "mqtt_example";
-
-static void IRAM_ATTR button_isr_handler(void *arg);
-static void button_task(void *arg);
+static const char *TAG = "mqtt_led_example";
 
 esp_mqtt_client_handle_t client;  // Global MQTT client handle
-volatile int button_pressed = 0;  // Flag to indicate button press state
 
 static void log_error_if_nonzero(const char *message, int error_code)
 {
@@ -52,10 +46,12 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 {
     ESP_LOGD(TAG, "Event dispatched from event loop base=%s, event_id=%" PRIi32 "", base, event_id);
     esp_mqtt_event_handle_t event = event_data;
-    int msg_id;
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
+        // Subscribe to the topic to control the LED
+        esp_mqtt_client_subscribe(client, "KMITL/SIET/65030018/topic/LED", 0);
+        ESP_LOGI(TAG, "Subscribed to topic: KMITL/SIET/65030018/topic/LED");
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
@@ -64,6 +60,17 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         ESP_LOGI(TAG, "MQTT_EVENT_DATA");
         printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
         printf("DATA=%.*s\r\n", event->data_len, event->data);
+
+        // Trim the data length and handle the control logic for the LED
+        if (strncmp(event->data, "ON", event->data_len) == 0) {
+            gpio_set_level(LED_GPIO, 1);  // Turn LED on
+            ESP_LOGI(TAG, "LED turned ON");
+        } else if (strncmp(event->data, "OFF", event->data_len) == 0) {
+            gpio_set_level(LED_GPIO, 0);  // Turn LED off
+            ESP_LOGI(TAG, "LED turned OFF");
+        } else {
+            ESP_LOGW(TAG, "Unknown command received");
+        }
         break;
     case MQTT_EVENT_ERROR:
         ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
@@ -81,54 +88,20 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 }
 
 /*
- * @brief Initializes GPIO for the button and configures interrupt handling
+ * @brief Initializes GPIO for the LED
  */
-static void button_init(void)
+static void led_init(void)
 {
-    gpio_config_t io_conf;
-    io_conf.intr_type = GPIO_INTR_ANYEDGE;  // Interrupt on both edges (button press and release)
-    io_conf.mode = GPIO_MODE_INPUT;         // Set as input mode
-    io_conf.pin_bit_mask = (1ULL << BUTTON_GPIO); // Bitmask for GPIO 23
-    io_conf.pull_down_en = 0;               // No pull-down
-    io_conf.pull_up_en = 1;                 // Enable pull-up resistor
-    gpio_config(&io_conf);
-
-    // Install GPIO ISR handler
-    gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);  // Fixed the missing flag definition
-    gpio_isr_handler_add(BUTTON_GPIO, button_isr_handler, NULL); // Attach interrupt handler
-}
-
-/*
- * @brief ISR handler for button press/release
- */
-static void IRAM_ATTR button_isr_handler(void *arg)
-{
-    button_pressed = gpio_get_level(BUTTON_GPIO);  // Read the button state (1 = pressed, 0 = released)
-    xTaskCreate(button_task, "button_task", 2048, NULL, 10, NULL);  // Trigger task to handle MQTT publishing
-}
-
-/*
- * @brief Task to publish message based on button state
- */
-static void button_task(void *arg)
-{
-    // Debounce: short delay to handle bouncing signals
-    vTaskDelay(100 / portTICK_PERIOD_MS);
-
-    // Check the button state after debounce
-    if (gpio_get_level(BUTTON_GPIO) == button_pressed) {  // Confirm the stable state
-        const char* message = (button_pressed == 1) ? "1" : "0";  // "1" when pressed, "0" when released
-        int msg_id = esp_mqtt_client_publish(client, "KMITL/SIET/65030018/topic/button", message, 0, 1, 0);
-        ESP_LOGI(TAG, "Button state: %s, published message, msg_id=%d", message, msg_id);
-    }
-
-    vTaskDelete(NULL);  // Delete the task after execution
+    // LED GPIO configuration
+    gpio_reset_pin(LED_GPIO);  // Reset and configure the LED pin
+    gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);  // Set LED as output
+    gpio_set_level(LED_GPIO, 0);  // Initially turn the LED off
 }
 
 static void mqtt_app_start(void)
 {
     esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = CONFIG_BROKER_URL,  // Make sure CONFIG_BROKER_URL is defined in menuconfig
+        .broker.address.uri = CONFIG_BROKER_URL,  // Ensure CONFIG_BROKER_URL is defined in menuconfig
     };
 
     client = esp_mqtt_client_init(&mqtt_cfg);
@@ -147,8 +120,8 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     ESP_ERROR_CHECK(example_connect());
 
-    // Initialize button
-    button_init();
+    // Initialize the LED GPIO
+    led_init();
 
     // Start MQTT client
     mqtt_app_start();
